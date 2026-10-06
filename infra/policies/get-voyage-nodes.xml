@@ -1,0 +1,18 @@
+<!-- get_voyage_nodes: GET /voyages/{voyId}/nodes -> POST svc/getNodeDetailListByVoyId {"voyId": n} -->
+<policies>
+  <inbound>
+    <base />
+    <set-method>POST</set-method>
+    <set-body>@(new JObject(new JProperty("voyId", int.Parse(context.Request.MatchedParameters["voyId"]))).ToString())</set-body>
+    <rewrite-uri template="svc/getNodeDetailListByVoyId" copy-unmatched-params="false" />
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

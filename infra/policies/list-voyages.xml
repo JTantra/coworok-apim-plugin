@@ -1,0 +1,119 @@
+<!-- list_voyages: GET /voyages -> GET svc/getAllVoyages, then filter + trim (full list is ~7.5 MB). -->
+<policies>
+  <inbound>
+    <base />
+    <rewrite-uri template="svc/getAllVoyages" copy-unmatched-params="false" />
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+    <choose>
+      <when condition="@(context.Response.StatusCode == 200)">
+        <set-body>@{
+          var q = context.Request.OriginalUrl.Query;
+          var nodes = new HashSet<string>(q.GetValueOrDefault("nodes", "").Trim().ToUpperInvariant().Split(new[]{',',' '}, StringSplitOptions.RemoveEmptyEntries));
+          // OEN dates are ISO-8601 UTC ("2026-10-04T08:00:00Z"); ordinal string comparison is chronological.
+          string from = q.GetValueOrDefault("from", "").Trim();
+          string to = q.GetValueOrDefault("to", "").Trim();
+          if (to.Length == 10) { to = to + "T23:59:59Z"; }
+          var vessel = q.GetValueOrDefault("vessel", "").Trim().ToUpperInvariant();
+          var service = q.GetValueOrDefault("service", "").Trim().ToUpperInvariant();
+          var oper = q.GetValueOrDefault("operator", "").Trim().ToUpperInvariant();
+          var riskOnly = q.GetValueOrDefault("at_risk_only", "").Trim().ToLowerInvariant() == "true";
+          int limit = 50; int.TryParse(q.GetValueOrDefault("limit", "").Trim(), out limit); if (limit <= 0) { limit = 50; } if (limit > 200) { limit = 200; }
+          var riskStatus = new HashSet<string>(new[]{"DELAYED","LATE","MISSED","AT_RISK"});
+          string[] dateFields = new[]{"actBerthDt","estBerthDt","agrBerthDt","petaDt","reqBerthDt"};
+
+          // getAllVoyages returns {status, message, result:[...]}; accept a bare array too.
+          var rootTok = context.Response.Body.As<JToken>(preserveContent: false);
+          var all = rootTok.Type == JTokenType.Array ? (JArray)rootTok : ((rootTok["result"] as JArray) ?? new JArray());
+          var outList = new List<JObject>();
+          foreach (JObject v in all) {
+            string vn = ((string)v["vesselName"] ?? "").ToUpperInvariant();
+            if (vessel != "" && !vn.Contains(vessel)) { continue; }
+            if (service != "" && ((string)v["serviceName"] ?? "").ToUpperInvariant() != service) { continue; }
+            if (oper != "" && ((string)v["vesselOperator"] ?? "").ToUpperInvariant() != oper) { continue; }
+            var nl = (v["nodeDTOList"] as JArray) ?? new JArray();
+            var slim = new JArray(); var matched = new JArray();
+            bool statusRisk = false; JObject worst = null, rec = null; double wv = 0, rv = 0;
+            foreach (JObject n in nl) {
+              string code = (string)n["nodeM"] ?? "";
+              string bdField = null; string bd = null;
+              foreach (var f in dateFields) {
+                var dt = n[f];
+                if (dt == null || dt.Type == JTokenType.Null) { continue; }
+                // Json.NET parses ISO strings into Date tokens; re-emit as ISO-8601 (OEN values are already UTC "Z") so string comparison is chronological.
+                string ds = dt.Type == JTokenType.Date ? ((DateTime)dt).ToString("yyyy-MM-ddTHH:mm:ssZ") : (string)dt;
+                if (!string.IsNullOrEmpty(ds)) { bdField = f; bd = ds; break; }
+              }
+              bool nodeOk = nodes.Count == 0 || nodes.Contains(code.ToUpperInvariant());
+              bool dateOk = bd != null
+                ? ((from == "" || string.CompareOrdinal(bd, from) >= 0) && (to == "" || string.CompareOrdinal(bd, to) <= 0))
+                : (from == "" && to == "");
+              if (nodeOk && dateOk) { matched.Add(code); }
+              string st = ((string)n["berthStatusM"] ?? "").ToUpperInvariant();
+              if (riskStatus.Contains(st)) { statusRisk = true; }
+              var apt = n["aptSavingsQ"]; var proj = n["projAptSavingsQ"];
+              if (apt != null && apt.Type != JTokenType.Null) {
+                double a = (double)apt;
+                if (worst == null || a < wv) { wv = a; worst = new JObject(new JProperty("node", code), new JProperty("order", n["nodeOrderN"]), new JProperty("aptSavingsHrs", Math.Round(a, 2))); }
+                if (a > 0 && (rec == null || a > rv)) { rv = a; rec = new JObject(new JProperty("node", code), new JProperty("order", n["nodeOrderN"]), new JProperty("savingsHrs", Math.Round(a, 2)), new JProperty("basis", "actual")); }
+              }
+              if (proj != null && proj.Type != JTokenType.Null) {
+                double p = (double)proj;
+                if (p > 0 && (rec == null || p > rv)) { rv = p; rec = new JObject(new JProperty("node", code), new JProperty("order", n["nodeOrderN"]), new JProperty("savingsHrs", Math.Round(p, 2)), new JProperty("basis", "projected")); }
+              }
+              slim.Add(new JObject(
+                new JProperty("node", code), new JProperty("order", n["nodeOrderN"]), new JProperty("localVoy", n["localVoyM"]),
+                new JProperty("status", n["berthStatusM"]), new JProperty("alert", n["alertI"]), new JProperty("skipCall", n["skipCallI"]),
+                new JProperty("berthDate", bd), new JProperty("berthDateBasis", bdField),
+                new JProperty("petaDt", n["petaDt"] != null && n["petaDt"].Type == JTokenType.Date ? (object)((DateTime)n["petaDt"]).ToString("yyyy-MM-ddTHH:mm:ssZ") : (object)n["petaDt"]), new JProperty("timezone", n["nodeTimezoneM"]),
+                new JProperty("aptSavingsHrs", n["aptSavingsQ"]), new JProperty("projAptSavingsHrs", n["projAptSavingsQ"]),
+                new JProperty("remarks", n["remarksX"]), new JProperty("remarksReason", n["remarksReasonM"])));
+            }
+            if (matched.Count == 0) { continue; }
+            var tot = v["totalAptSavings"];
+            double? net = (tot == null || tot.Type == JTokenType.Null) ? (double?)null : (double)tot;
+            bool atRisk = statusRisk || (net.HasValue && net.Value < 0);
+            if (riskOnly && !atRisk) { continue; }
+            outList.Add(new JObject(
+              new JProperty("voyId", v["voyId"]), new JProperty("vessel", v["vesselName"]), new JProperty("imo", v["vesselIMO"]),
+              new JProperty("service", v["serviceName"]), new JProperty("operator", v["vesselOperator"]),
+              new JProperty("networkSavingsHrs", net.HasValue ? (object)Math.Round(net.Value, 2) : null),
+              new JProperty("atRisk", atRisk), new JProperty("atRiskReason", atRisk ? (statusRisk ? (net.HasValue && net.Value < 0 ? "status+negative_network_savings" : "node_status") : "negative_network_savings") : null),
+              new JProperty("worstNode", worst), new JProperty("recoveryNode", rec),
+              new JProperty("matchedNodes", matched), new JProperty("nodes", slim)));
+          }
+          var keys = new double[outList.Count];
+          for (int i = 0; i < outList.Count; i++) {
+            var o = outList[i];
+            keys[i] = riskOnly ? (o["networkSavingsHrs"].Type == JTokenType.Null ? double.MaxValue : (double)o["networkSavingsHrs"]) : (double)(int)o["voyId"];
+          }
+          var arr = outList.ToArray();
+          Array.Sort(keys, arr);
+          var page = new JArray();
+          for (int i = 0; i < arr.Length && i < limit; i++) { page.Add(arr[i]); }
+          return new JObject(
+            new JProperty("source", "OEN getAllVoyages"),
+            new JProperty("observedAtUtc", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")),
+            new JProperty("totalVoyages", all.Count),
+            new JProperty("matched", outList.Count),
+            new JProperty("returned", page.Count),
+            new JProperty("truncated", outList.Count > page.Count),
+            new JProperty("sortedBy", riskOnly ? "networkSavingsHrs ascending (worst first)" : "voyId"),
+            new JProperty("filters", new JObject(
+              new JProperty("nodes", new JArray(nodes.ToArray())), new JProperty("from", from), new JProperty("to", to),
+              new JProperty("vessel", vessel), new JProperty("service", service), new JProperty("operator", oper),
+              new JProperty("at_risk_only", riskOnly), new JProperty("limit", limit))),
+            new JProperty("voyages", page)).ToString();
+        }</set-body>
+        <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+      </when>
+    </choose>
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

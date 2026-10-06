@@ -1,0 +1,56 @@
+<!-- oen-mcp policy (deployed by apim-oen.bicep).
+     Inbound: require a valid user token (OEN.Read) before any MCP traffic.
+     Outbound: add MCP tool annotations (readOnlyHint etc.) to tools/list responses only, so Copilot
+     Cowork treats the three read-only tools as safe. Every other response passes through untouched. -->
+<policies>
+	<inbound>
+		<base />
+		<validate-azure-ad-token tenant-id="{{oen-tenant-id}}" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Sign in with your organisation account.">
+			<audiences>
+				<audience>api://{{oen-gw-client-id}}</audience>
+				<audience>{{oen-gw-client-id}}</audience>
+			</audiences>
+			<required-claims>
+				<claim name="scp" match="any" separator=" ">
+					<value>OEN.Read</value>
+				</claim>
+			</required-claims>
+		</validate-azure-ad-token>
+		<set-variable name="isToolsList" value="@{
+			var b = context.Request.Body?.As<string>(preserveContent: true) ?? "";
+			return b.Contains("\"tools/list\"");
+		}" />
+	</inbound>
+	<backend>
+		<base />
+	</backend>
+	<outbound>
+		<base />
+		<choose>
+			<when condition="@((bool)context.Variables.GetValueOrDefault<bool>("isToolsList", false) &amp;&amp; context.Response.StatusCode == 200 &amp;&amp; (context.Response.Headers.GetValueOrDefault("Content-Type","")).Contains("application/json"))">
+				<set-body>@{
+					var raw = context.Response.Body.As<string>(preserveContent: true);
+					try {
+						var j = Newtonsoft.Json.Linq.JObject.Parse(raw);
+						var tools = j["result"]?["tools"] as Newtonsoft.Json.Linq.JArray;
+						if (tools == null) { return raw; }
+						foreach (Newtonsoft.Json.Linq.JObject t in tools) {
+							var n = (string)t["name"];
+							var title = n == "list_voyages" ? "List voyages" : n == "get_voyage" ? "Get voyage" : n == "get_voyage_nodes" ? "Get voyage nodes" : n;
+							t["annotations"] = new Newtonsoft.Json.Linq.JObject(
+								new Newtonsoft.Json.Linq.JProperty("title", title),
+								new Newtonsoft.Json.Linq.JProperty("readOnlyHint", true),
+								new Newtonsoft.Json.Linq.JProperty("destructiveHint", false),
+								new Newtonsoft.Json.Linq.JProperty("idempotentHint", true),
+								new Newtonsoft.Json.Linq.JProperty("openWorldHint", true));
+						}
+						return j.ToString(Newtonsoft.Json.Formatting.None);
+					} catch { return raw; }
+				}</set-body>
+			</when>
+		</choose>
+	</outbound>
+	<on-error>
+		<base />
+	</on-error>
+</policies>

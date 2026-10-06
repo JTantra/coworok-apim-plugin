@@ -1,0 +1,46 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.29/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.29",
+  "version": "2.0.7",
+  "id": "3f46bb12-bbde-5825-8cca-6f09e80bff22",
+  "developer": {
+    "name": "Microsoft Innovation Hub",
+    "websiteUrl": "https://www.microsoft.com",
+    "privacyUrl": "https://privacy.microsoft.com",
+    "termsOfUseUrl": "https://www.microsoft.com/legal/terms-of-use"
+  },
+  "name": {
+    "short": "PSA OEN",
+    "full": "PSA N2N OEN voyage performance (API + UI)"
+  },
+  "description": {
+    "short": "PSA OEN voyages, risk and recovery via API as you.",
+    "full": "Answers PSA N2N OEN voyage questions - listings, at-risk voyages, worst and recovery nodes, recovery levers - using the OEN API through an Azure API Management MCP server that calls OEN as the signed-in user with their linked OEN account. Falls back to the OEN browser UI for CSV export and UI-only fields."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#0B5CAD",
+  "agentSkills": [
+    {
+      "folder": "./skills/psa-n2n-oen"
+    }
+  ],
+  "agentConnectors": [
+    {
+      "id": "psa-oen",
+      "displayName": "PSA OEN",
+      "description": "PSA OEN voyage tools (list_voyages, get_voyage, get_voyage_nodes), run as the signed-in user.",
+      "toolSource": {
+        "remoteMcpServer": {
+          "mcpServerUrl": "https://apim-psa-oen-hub.azure-api.net/oen-mcp/mcp",
+          "authorization": {
+            "type": "OAuthPluginVault",
+            "referenceId": "MjI3MGIzMDctNDZlOS00ZTlhLThiNDQtMzUzZDU1MjNmNzVmIyMyZTNjMjlhMS0xYWVhLTQxMjUtYTQ2MS03YTg3ZTEzMzdhYzc="
+          }
+        }
+      }
+    }
+  ]
+}

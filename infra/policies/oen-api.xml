@@ -1,0 +1,114 @@
+<!--
+  OEN API (per-user). Runs for every operation, including calls made through the MCP server.
+  1. Validate the caller's Entra token (this tenant, gateway audience, OEN.Read scope).
+  2. Use ONLY the token's oid to find that user's OEN login in Key Vault (oen-cred-<oid>).
+  3. Sign in to OEN as that user, cache the OEN token per oid (~23h), forward with OEN's headers.
+-->
+<policies>
+  <inbound>
+    <base />
+    <validate-azure-ad-token tenant-id="{{oen-tenant-id}}" header-name="Authorization" failed-validation-httpcode="401" failed-validation-error-message="Sign in with your organisation account." output-token-variable-name="jwt">
+      <audiences>
+        <audience>api://{{oen-gw-client-id}}</audience>
+        <audience>{{oen-gw-client-id}}</audience>
+      </audiences>
+      <required-claims>
+        <claim name="scp" match="any" separator=" ">
+          <value>OEN.Read</value>
+        </claim>
+      </required-claims>
+    </validate-azure-ad-token>
+    <set-variable name="oid" value="@(((Jwt)context.Variables["jwt"]).Claims.GetValueOrDefault("oid", "").ToLowerInvariant())" />
+    <choose>
+      <when condition="@(((string)context.Variables["oid"]).Length != 36)">
+        <return-response>
+          <set-status code="401" reason="Unauthorized" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-body>{"error":"no_user_identity","message":"A signed-in user token is required."}</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <cache-lookup-value key="@("oen-tok-" + (string)context.Variables["oid"])" variable-name="oenToken" />
+    <choose>
+      <when condition="@(!context.Variables.ContainsKey("oenToken"))">
+        <send-request mode="new" response-variable-name="kvResp" timeout="15" ignore-error="true">
+          <set-url>@("{{oen-kv-uri}}secrets/oen-cred-" + (string)context.Variables["oid"] + "?api-version=7.4")</set-url>
+          <set-method>GET</set-method>
+          <authentication-managed-identity resource="https://vault.azure.net" />
+        </send-request>
+        <choose>
+          <when condition="@(context.Variables["kvResp"] == null || ((IResponse)context.Variables["kvResp"]).StatusCode != 200)">
+            <return-response>
+              <set-status code="403" reason="Forbidden" />
+              <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+              <set-body>@{
+                var r = (IResponse)context.Variables["kvResp"];
+                return new JObject(
+                  new JProperty("error", "oen_account_not_linked"),
+                  new JProperty("message", "Your OEN account is not linked yet. Open the link page, sign in, and enter your OEN login once."),
+                  new JProperty("link_url", "{{oen-link-url}}"),
+                  new JProperty("vault_status", r == null ? 0 : r.StatusCode)).ToString();
+              }</set-body>
+            </return-response>
+          </when>
+        </choose>
+        <set-variable name="cred" value="@(((IResponse)context.Variables["kvResp"]).Body.As<JObject>()["value"].ToString())" />
+        <send-request mode="new" response-variable-name="signin" timeout="20" ignore-error="true">
+          <set-url>{{oen-api-base}}auth/signin</set-url>
+          <set-method>POST</set-method>
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-header name="User-Agent" exists-action="override"><value>Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36</value></set-header>
+          <set-header name="Origin" exists-action="override"><value>{{oen-web-origin}}</value></set-header>
+          <set-header name="Referer" exists-action="override"><value>{{oen-web-origin}}/oen/</value></set-header>
+          <set-body>@((string)context.Variables["cred"])</set-body>
+        </send-request>
+        <set-variable name="cred" value="" />
+        <choose>
+          <when condition="@(context.Variables["signin"] == null || ((IResponse)context.Variables["signin"]).StatusCode != 200 || string.IsNullOrEmpty(((IResponse)context.Variables["signin"]).Headers.GetValueOrDefault("jwt-token", "")))">
+            <return-response>
+              <set-status code="403" reason="Forbidden" />
+              <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+              <set-body>@{
+                var r = (IResponse)context.Variables["signin"];
+                return new JObject(
+                  new JProperty("error", "oen_signin_failed"),
+                  new JProperty("message", "OEN rejected your stored login (password changed?) or could not be reached. Re-link your OEN account and retry."),
+                  new JProperty("link_url", "{{oen-link-url}}"),
+                  new JProperty("oen_status", r == null ? 0 : r.StatusCode)).ToString();
+              }</set-body>
+            </return-response>
+          </when>
+        </choose>
+        <set-variable name="oenToken" value="@(((IResponse)context.Variables["signin"]).Headers.GetValueOrDefault("jwt-token", ""))" />
+        <cache-store-value key="@("oen-tok-" + (string)context.Variables["oid"])" value="@((string)context.Variables["oenToken"])" duration="82800" />
+      </when>
+    </choose>
+    <set-header name="Authorization" exists-action="override">
+      <value>@((string)context.Variables["oenToken"])</value>
+    </set-header>
+    <set-header name="creatorOrgCode" exists-action="override"><value>ONE</value></set-header>
+    <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+    <set-header name="User-Agent" exists-action="override"><value>Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126 Safari/537.36</value></set-header>
+    <set-header name="Origin" exists-action="override"><value>{{oen-web-origin}}</value></set-header>
+    <set-header name="Referer" exists-action="override"><value>{{oen-web-origin}}/oen/</value></set-header>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+    <choose>
+      <when condition="@(context.Response.StatusCode == 401 || context.Response.StatusCode == 403)">
+        <cache-remove-value key="@("oen-tok-" + (string)context.Variables["oid"])" />
+        <return-response>
+          <set-status code="503" reason="Retry" />
+          <set-header name="Content-Type" exists-action="override"><value>application/json</value></set-header>
+          <set-body>{"error":"oen_session_expired","message":"The OEN session expired. Retry the same call once; a new session will be created."}</set-body>
+        </return-response>
+      </when>
+    </choose>
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

@@ -1,0 +1,29 @@
+# --- secrets / session material (never commit) ---
+recon/
+*.har
+storage.json
+*.env
+.env*
+*token*.json
+*.pem
+*.pfx
+
+# --- build output ---
+plugin/dist/
+*.zip
+
+# --- runtime state / logs ---
+cicd/.last-published.sha256
+infra/backup/
+*.log
+
+# --- dependencies / caches ---
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# --- OS / editor noise ---
+*Zone.Identifier
+.DS_Store
+.vscode/
